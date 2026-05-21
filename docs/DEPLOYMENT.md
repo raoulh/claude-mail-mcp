@@ -30,29 +30,71 @@ echo "AUTH_TOKEN=$(openssl rand -hex 32)" >> .env
 
 For two-factor mailboxes (Gmail, iCloud, Fastmail) use an **app-specific password**, never your main account password. See the table in the [README](../README.md#app-passwords-mandatory-on-2fa-accounts) for direct links.
 
-## 3. Run via pm2
+## 3. Create the dedicated service user
 
 ```bash
-pm2 start ecosystem.config.cjs
-pm2 save
-pm2 startup systemd   # enable on boot
-pm2 logs claude-mail-mcp
+useradd --system --no-create-home --shell /usr/sbin/nologin --comment "claude-mail-mcp" mailmcp
+mkdir -p /var/lib/mail-mcp/oauth-state
+chown -R mailmcp:mailmcp /var/lib/mail-mcp
+chmod 700 /var/lib/mail-mcp /var/lib/mail-mcp/oauth-state
+chgrp mailmcp /var/www/mail-mcp/.env
+chmod 640 /var/www/mail-mcp/.env
 ```
 
-### Alternative: systemd
+If you use an htpasswd file for the bundled OAuth shim, give the shim's user group-read access:
+
+```bash
+chgrp mailmcp /etc/nginx/.htpasswd_mail
+chmod 640 /etc/nginx/.htpasswd_mail
+```
+
+## 4. Run via hardened systemd unit
+
+`/etc/systemd/system/claude-mail-mcp.service`:
 
 ```ini
 [Unit]
-Description=claude-mail-mcp
+Description=claude-mail-mcp — IMAP/SMTP/CalDAV MCP backend
 After=network.target
+Wants=network.target
 
 [Service]
 Type=simple
-User=www-data
+User=mailmcp
+Group=mailmcp
 WorkingDirectory=/var/www/mail-mcp
+Environment=NODE_ENV=production
 ExecStart=/usr/bin/node --env-file=/var/www/mail-mcp/.env --enable-source-maps /var/www/mail-mcp/dist/index.js
 Restart=on-failure
 RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+ReadWritePaths=/var/lib/mail-mcp
+MemoryMax=512M
+TasksMax=128
+LimitNOFILE=4096
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 
 [Install]
 WantedBy=multi-user.target
@@ -60,10 +102,16 @@ WantedBy=multi-user.target
 
 ```bash
 systemctl daemon-reload
-systemctl enable --now claude-mail-mcp
+systemctl enable --now claude-mail-mcp.service
+systemctl status claude-mail-mcp.service
+journalctl -u claude-mail-mcp.service -f
 ```
 
-## 4. Reverse proxy (nginx)
+### Alternative: pm2 (local dev only)
+
+The repo ships `ecosystem.config.cjs` for `pm2 start ecosystem.config.cjs`. Not recommended for production — pm2 runs as the invoking user (typically root) and provides none of the systemd isolation above.
+
+## 5. Reverse proxy (nginx)
 
 ```nginx
 server {
@@ -106,7 +154,7 @@ server {
 certbot --nginx -d mcp-mail.example.com
 ```
 
-## 5. Add to Claude
+## 6. Add to Claude
 
 ### Option A — Claude Desktop (Bearer auth, simplest)
 
@@ -143,7 +191,7 @@ When the shim is in front:
 4. A login popup asks for the htpasswd user/password
 5. The tools appear in the connector
 
-## 6. Verify
+## 7. Verify
 
 ```bash
 # health
@@ -163,17 +211,17 @@ curl -X POST https://mcp-mail.example.com/mcp \
 # → JSON with 9 or 13 tools (depending on whether CALDAV_URL is set)
 ```
 
-## 7. Updating
+## 8. Updating
 
 ```bash
 cd /var/www/mail-mcp
 git pull
 npm ci
 npm run build
-pm2 reload claude-mail-mcp --update-env
+systemctl restart claude-mail-mcp.service
 ```
 
-## 8. Operational notes
+## 9. Operational notes
 
 **Credentials.** Rotate `AUTH_TOKEN` periodically. If you use an app-specific password (Gmail, iCloud, Fastmail), revoke it from the provider's UI when the connector is decommissioned.
 

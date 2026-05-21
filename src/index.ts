@@ -22,7 +22,7 @@ import { ClientPool } from "./client-pool.js";
 import { registerMailTools } from "./tools-mail.js";
 import { registerCalendarTools } from "./tools-calendar.js";
 
-const VERSION = "0.2.0";
+const VERSION = "0.2.1";
 
 function log(
   level: "debug" | "info" | "warn" | "error",
@@ -130,8 +130,9 @@ async function main(): Promise<void> {
     });
   });
 
-  app.listen(config.port, () => {
+  app.listen(config.port, config.host, () => {
     log("info", "claude-mail-mcp listening", {
+      host: config.host,
       port: config.port,
       version: VERSION,
       public_url: config.publicUrl,

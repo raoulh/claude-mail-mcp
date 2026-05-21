@@ -162,13 +162,21 @@ Everything is one Node process. IMAP holds a single long-lived connection with p
 
 ## Security model
 
-- **One deployment = one mailbox.** No multi-tenant state in v0.1.
-- **Bearer token** in `Authorization: Bearer <AUTH_TOKEN>` gates every `/mcp` call.
-- **TLS termination** is expected upstream — bind only to localhost in production.
-- **Destructive tools** (`delete_message`) document the irreversibility in their description so Claude.ai surfaces a confirmation step in the UI. Prefer `move_message` to a Trash folder for reversibility.
-- **Credentials** never leave `.env`. They are never logged or returned to the client.
+See **[SECURITY.md](SECURITY.md)** for the threat model and **[docs/HARDENING.md](docs/HARDENING.md)** for the full operator checklist.
 
-Reporting issues: see [SECURITY.md](SECURITY.md).
+Defaults in one sentence: TLS via Let's Encrypt + HSTS + rate-limited htpasswd + OAuth 2.1 with CSRF guard + non-root systemd unit with `ProtectSystem=strict` + kernel-level loopback-only filter + credentials chmod 600 owned by a dedicated `mailmcp` user.
+
+### Quick summary
+
+- **Transport:** TLS 1.3 (Let's Encrypt, auto-renew), HSTS, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `X-Robots-Tag: noindex`.
+- **Auth:** OAuth 2.1 + DCR + PKCE + JWT (RS256, 1h access, 30d refresh) gated by htpasswd login. CSRF guard on `/settings` POST. Brute-force throttled at nginx (10 req/min on auth endpoints).
+- **Process:** Both services run as a dedicated non-root `mailmcp` system user (no shell). Full systemd hardening: `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`, `ProtectKernel*`, `ProtectClock`, `ProtectHostname`, `ProtectProc=invisible`, `RestrictNamespaces`, `LockPersonality`, `SystemCallFilter=@system-service ~@privileged @resources`, `MemoryMax=512M`.
+- **Network:** Backend + shim bound to `127.0.0.1` only. Shim also blocks non-loopback at kernel level (`IPAddressDeny=any`). UFW default-deny on the host.
+- **Storage:** Credentials chmod 600, owned by `mailmcp`, in `/var/lib/mail-mcp/`. htpasswd file chmod 640 (not world-readable). `.env` chmod 640 `root:mailmcp`.
+- **Output:** `list_accounts` returns id/label/From — never credentials. Logs never include passwords or Bearer tokens.
+- **Destructive tools** (`delete_message`) document irreversibility so Claude.ai surfaces a confirmation step. Prefer `move_message` to a Trash folder for reversibility.
+
+Full threat-model walkthrough and operator hardening checklist in [docs/HARDENING.md](docs/HARDENING.md). Reporting issues: see [SECURITY.md](SECURITY.md).
 
 ---
 

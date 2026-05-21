@@ -33,6 +33,13 @@ function int(name: string, fallback: number): number {
 
 export const config = {
   port: int("PORT", 3220),
+  /**
+   * Interface to bind. Default 127.0.0.1 (loopback only) — the public
+   * hostname is terminated by nginx/Caddy upstream. Set to 0.0.0.0 only
+   * if you really want the process directly internet-reachable, in which
+   * case you're on your own re. TLS, rate-limiting, etc.
+   */
+  host: optional("HOST", "127.0.0.1"),
   logLevel: optional("LOG_LEVEL", "info") as
     | "debug"
     | "info"
