@@ -1,13 +1,15 @@
 #!/usr/bin/env node
 /**
- * claude-mail-mcp — entry point.
+ * claude-mail-mcp — entry point (v0.2).
  *
  * Boots an Express server that exposes:
- *   - GET  /health        liveness probe
+ *   - GET  /health        liveness probe + accounts summary
  *   - POST /mcp           MCP Streamable HTTP transport (Bearer-auth gated)
  *
- * v0.1 single-tenant: one IMAP/SMTP/CalDAV credential set per deployment,
- * one shared Bearer auth token.
+ * v0.2: multi-account per deployment. Credentials live in accounts.json
+ * (managed by the OAuth shim's /settings UI), watched via fs.watch for
+ * hot-reload. Calendar tools are always registered; tools that require
+ * CalDAV error friendly if the resolved account has none configured.
  */
 
 import express, { NextFunction, Request, Response } from "express";
@@ -15,13 +17,12 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
 import { config } from "./config.js";
-import { ImapClient } from "./imap-client.js";
-import { SmtpClient } from "./smtp-client.js";
-import { CalDavClient } from "./caldav-client.js";
+import { AccountsStore } from "./accounts.js";
+import { ClientPool } from "./client-pool.js";
 import { registerMailTools } from "./tools-mail.js";
 import { registerCalendarTools } from "./tools-calendar.js";
 
-const VERSION = "0.1.0";
+const VERSION = "0.2.0";
 
 function log(
   level: "debug" | "info" | "warn" | "error",
@@ -36,7 +37,6 @@ function log(
     msg: message,
     ...extra,
   };
-  // stderr keeps stdout clean for the (unused) stdio transport
   console.error(JSON.stringify(line));
 }
 
@@ -58,47 +58,31 @@ function bearerAuth(req: Request, res: Response, next: NextFunction): void {
 }
 
 async function main(): Promise<void> {
-  const imap = new ImapClient({
-    host: config.imap.host,
-    port: config.imap.port,
-    user: config.imap.user,
-    pass: config.imap.pass,
-    secure: config.imap.tls,
-  });
-
-  const smtp = new SmtpClient(
-    {
-      host: config.smtp.host,
-      port: config.smtp.port,
-      user: config.smtp.user,
-      pass: config.smtp.pass,
-      secure: config.smtp.tls,
-    },
-    {
-      from: config.mail.defaultFrom,
-      fromName: config.mail.defaultFromName || undefined,
-    }
-  );
-
-  const caldav = config.caldav.enabled
-    ? new CalDavClient({
-        url: config.caldav.url,
-        user: config.caldav.user,
-        pass: config.caldav.pass,
+  const store = new AccountsStore(config.accountsFile);
+  const pool = new ClientPool(store);
+  await store.start((next, prev) => {
+    log("info", "accounts.json changed", {
+      previous: prev.map((a) => a.id),
+      current: next.map((a) => a.id),
+    });
+    pool.resetAll().catch((err) =>
+      log("warn", "client pool reset failed", {
+        error: err instanceof Error ? err.message : String(err),
       })
-    : null;
+    );
+  });
+  log("info", "accounts loaded", {
+    file: config.accountsFile,
+    count: store.list().length,
+    ids: store.ids(),
+  });
 
   const mcp = new McpServer({
     name: "claude-mail-mcp",
     version: VERSION,
   });
-  registerMailTools(mcp, imap, smtp, {
-    draftsFolder: config.mail.draftsFolder,
-    sentFolder: config.mail.sentFolder || null,
-  });
-  if (caldav) {
-    registerCalendarTools(mcp, caldav);
-  }
+  registerMailTools(mcp, pool, store);
+  registerCalendarTools(mcp, pool);
 
   const app = express();
   app.disable("x-powered-by");
@@ -110,9 +94,8 @@ async function main(): Promise<void> {
       status: "ok",
       server: "claude-mail-mcp",
       version: VERSION,
-      imap_host: config.imap.host,
-      smtp_host: config.smtp.host,
-      caldav_enabled: config.caldav.enabled,
+      accounts: store.publicSummaries(),
+      accounts_file: config.accountsFile,
     });
   });
 
@@ -152,15 +135,15 @@ async function main(): Promise<void> {
       port: config.port,
       version: VERSION,
       public_url: config.publicUrl,
-      imap_host: config.imap.host,
-      smtp_host: config.smtp.host,
-      caldav_enabled: config.caldav.enabled,
+      accounts_file: config.accountsFile,
+      accounts: store.ids(),
     });
   });
 
   const shutdown = async (signal: string): Promise<void> => {
     log("info", "shutting down", { signal });
-    await imap.close().catch(() => {});
+    store.stop();
+    await pool.closeAll().catch(() => {});
     process.exit(0);
   };
   process.on("SIGTERM", () => void shutdown("SIGTERM"));

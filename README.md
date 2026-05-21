@@ -1,8 +1,8 @@
 # claude-mail-mcp
 
-Self-hosted **IMAP / SMTP / CalDAV connector for Claude**. A Streamable HTTP MCP server that lets [Claude.ai](https://claude.ai) read and write your email + calendar against any RFC-compliant mailbox.
+Self-hosted **IMAP / SMTP / CalDAV connector for Claude** with multi-account support. A Streamable HTTP MCP server that lets [Claude.ai](https://claude.ai) read and write your email + calendar against any RFC-compliant mailbox.
 
-> Built because every other Claude email connector targets Gmail. This one is for the rest of us — Mailbox.org, Fastmail, iCloud, Mailcow, iRedMail, Migadu, Nextcloud, your own Postfix box. If your provider speaks IMAP, SMTP and CalDAV, this works.
+> Built because every other Claude email connector targets Gmail. This one is for the rest of us — Mailbox.org, Fastmail, iCloud, Mailcow, iRedMail, Migadu, Nextcloud, your own Postfix box. If your provider speaks IMAP, SMTP and CalDAV, this works. One connector, all your inboxes.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![Node](https://img.shields.io/badge/node-%3E=20-brightgreen.svg)](https://nodejs.org)
 
@@ -10,7 +10,13 @@ Self-hosted **IMAP / SMTP / CalDAV connector for Claude**. A Streamable HTTP MCP
 
 ## What it does
 
-Exposes 13 MCP tools to Claude:
+Exposes 14 MCP tools to Claude:
+
+**Accounts (1)**
+
+| Tool | Purpose |
+|------|---------|
+| `list_accounts` | List all configured mailboxes — id, label, default flag, From, CalDAV-enabled. Never returns credentials. |
 
 **Mail (9)**
 
@@ -26,7 +32,7 @@ Exposes 13 MCP tools to Claude:
 | `move_message` | Move between folders |
 | `delete_message` | Delete (destructive — prefer move to Trash) |
 
-**Calendar (4, only if `CALDAV_URL` is set)**
+**Calendar (4)**
 
 | Tool | Purpose |
 |------|---------|
@@ -34,6 +40,8 @@ Exposes 13 MCP tools to Claude:
 | `list_events` | Events in a time window (recurrences expanded) |
 | `create_event` | Add new event (writes to CalDAV) |
 | `find_free_slot` | Compute free intervals across one or more calendars |
+
+Every tool accepts an optional `account: "<id>"` parameter to pick a mailbox; omit it to use the default account. So "list unread in INBOX of work account" vs "compare today's calendar across work and personal" both work in one connector.
 
 ---
 
@@ -55,16 +63,37 @@ git clone https://github.com/maxx3250/claude-mail-mcp.git
 cd claude-mail-mcp
 npm install
 cp .env.example .env
-# Fill in IMAP_*, SMTP_*, DEFAULT_FROM, AUTH_TOKEN (and CALDAV_* if you want calendar)
+# Generate an AUTH_TOKEN and fill it into .env:
+#   echo "AUTH_TOKEN=$(openssl rand -hex 32)" >> .env
 npm run build
 npm start
 ```
+
+The server boots with **no mailboxes configured** — that's fine. Add them via the OAuth shim's `/settings` UI (see [Deployment](docs/DEPLOYMENT.md)) or hand-craft an `accounts.json`:
+
+```json
+{
+  "version": 1,
+  "accounts": [
+    {
+      "id": "main",
+      "label": "Main",
+      "default": true,
+      "imap": { "host": "imap.mailbox.org", "port": 993, "user": "you@example.com", "pass": "secret", "tls": true },
+      "smtp": { "host": "smtp.mailbox.org", "port": 465, "user": "you@example.com", "pass": "secret", "tls": true },
+      "mail": { "defaultFrom": "you@example.com", "draftsFolder": "Drafts", "sentFolder": "Sent" }
+    }
+  ]
+}
+```
+
+Save as `/root/.config/mail-mcp/accounts.json` (chmod 600), or set `ACCOUNTS_FILE=./accounts.json` in `.env` for local dev. The backend re-reads via `fs.watch`, no restart needed.
 
 Smoke test:
 
 ```bash
 curl http://localhost:3220/health
-# {"status":"ok","server":"claude-mail-mcp",…,"caldav_enabled":true}
+# {"status":"ok","server":"claude-mail-mcp","version":"0.2.0","accounts":[{…}],…}
 ```
 
 ---
@@ -145,8 +174,8 @@ Reporting issues: see [SECURITY.md](SECURITY.md).
 
 ## Roadmap
 
-- **v0.2** — Multi-tenant: SQLite-backed token store, per-user IMAP/SMTP credentials, OAuth flow that asks the user for their server settings
-- **v0.3** — Threading-aware `list_threads` tool, attachment download, calendar invitation (iMIP) sending
+- **v0.2** ✅ — Multi-account per deployment, browser setup flow (this release)
+- **v0.3** — Threading-aware `list_threads` tool, attachment download as base64, calendar invitation (iMIP) sending
 - **v0.4** — CardDAV (contacts), JMAP support as an alternative to IMAP for Fastmail/Topicbox
 - **v1.0** — Audit log, Prometheus metrics, rate limiting, hardened deployment guide
 

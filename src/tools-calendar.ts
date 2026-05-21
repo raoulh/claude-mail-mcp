@@ -1,15 +1,17 @@
 /**
- * Calendar tool registry.
+ * Calendar tool registry (v0.2).
  *
- * Four tools: discover calendars, list events in a window, create new
- * events, find free time slots across one or more calendars.
+ * Calendar tools are registered for any account that has CalDAV configured.
+ * Each tool accepts an optional `account` parameter selecting which mailbox's
+ * calendar to act on. If the resolved account has no CalDAV, the tool
+ * surfaces a clear error rather than silently failing.
  *
  * All times are ISO 8601 with timezone offset (e.g. 2026-05-22T09:00:00+02:00).
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { CalDavClient } from "./caldav-client.js";
+import { ClientPool } from "./client-pool.js";
 
 function asJson(value: unknown): { content: { type: "text"; text: string }[] } {
   return {
@@ -28,18 +30,38 @@ const isoDateTime = z
     "ISO 8601 datetime with timezone offset, e.g. 2026-05-22T09:00:00+02:00"
   );
 
+const accountSchema = z
+  .string()
+  .optional()
+  .describe(
+    "Account ID (from list_accounts) to act on. Omit to use the default account."
+  );
+
+function requireCaldav(pool: ClientPool, accountId?: string) {
+  const clients = pool.for(accountId);
+  if (!clients.caldav) {
+    throw new Error(
+      `Account "${accountId ?? "(default)"}" has no CalDAV configured. Add a CalDAV URL in the connector's /settings page.`
+    );
+  }
+  return clients.caldav;
+}
+
 export function registerCalendarTools(
   server: McpServer,
-  caldav: CalDavClient
+  pool: ClientPool
 ): void {
   server.registerTool(
     "list_calendars",
     {
       description:
-        "List all CalDAV calendars on the configured account. Returns URL (used as `calendar_url` in other tools), display name, timezone, and supported components.",
-      inputSchema: {},
+        "List all CalDAV calendars on the configured account. Returns URL (used as `calendar_url` in other tools), display name, timezone, and supported components. Errors if the resolved account has no CalDAV configured.",
+      inputSchema: {
+        account: accountSchema,
+      },
     },
-    async () => {
+    async ({ account }) => {
+      const caldav = requireCaldav(pool, account);
       return asJson(await caldav.listCalendars());
     }
   );
@@ -56,9 +78,11 @@ export function registerCalendarTools(
           .describe("Calendar URL as returned by list_calendars"),
         start: isoDateTime.describe("Window start (inclusive)"),
         end: isoDateTime.describe("Window end (exclusive)"),
+        account: accountSchema,
       },
     },
-    async ({ calendar_url, start, end }) => {
+    async ({ calendar_url, start, end, account }) => {
+      const caldav = requireCaldav(pool, account);
       const events = await caldav.listEvents(calendar_url, start, end);
       return asJson({ count: events.length, events });
     }
@@ -86,9 +110,11 @@ export function registerCalendarTools(
           .describe(
             "Email addresses of attendees. Note: CalDAV does NOT send invitations on its own — most servers expect the client to mail the iMIP invite separately."
           ),
+        account: accountSchema,
       },
     },
     async (args) => {
+      const caldav = requireCaldav(pool, args.account);
       const result = await caldav.createEvent({
         calendarUrl: args.calendar_url,
         summary: args.summary,
@@ -130,9 +156,11 @@ export function registerCalendarTools(
           .describe(
             "Restrict slots to this daily UTC window (e.g. 8–18 for 09:00–19:00 in CEST)"
           ),
+        account: accountSchema,
       },
     },
     async (args) => {
+      const caldav = requireCaldav(pool, args.account);
       const slots = await caldav.findFreeSlots(
         args.calendar_urls,
         args.range_start,
