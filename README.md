@@ -200,3 +200,7 @@ MIT — see [LICENSE](LICENSE).
 - [tsdav](https://github.com/natelindev/tsdav) — clean TypeScript WebDAV/CalDAV/CardDAV
 - [ical.js](https://github.com/kewisch/ical.js) — battle-tested iCalendar parser
 - [@modelcontextprotocol/sdk](https://github.com/modelcontextprotocol/typescript-sdk) — Anthropic's official MCP SDK
+
+---
+
+Built by [Markus Stöger](https://markusstoeger.com) — WooCommerce, headless commerce and AI integration.
