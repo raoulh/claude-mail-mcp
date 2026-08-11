@@ -16,6 +16,47 @@ import {
 } from "tsdav";
 import ICAL from "ical.js";
 import { randomUUID } from "node:crypto";
+import { toIsoOrNull } from "./safe-date.js";
+
+function warn(message: string, extra: Record<string, unknown>): void {
+  console.error(
+    JSON.stringify({
+      ts: new Date().toISOString(),
+      level: "warn",
+      msg: message,
+      ...extra,
+    })
+  );
+}
+
+/**
+ * Read an ICAL.Time-valued getter and render it as an ISO string, never
+ * throwing.
+ *
+ * ical.js has three separate failure modes here, all of which used to abort
+ * the whole `list_events` response:
+ *   - a malformed value (`DTSTART:GARBAGE`) makes the *getter itself* throw
+ *     `invalid date-time value`;
+ *   - a missing DTSTART makes `startDate` return null, so `.toJSDate()` throws
+ *     a TypeError, and `endDate` throws while dereferencing it;
+ *   - a representable-but-absurd time can still yield an Invalid Date, whose
+ *     `.toISOString()` throws `RangeError: Invalid time value`.
+ */
+function icalTimeToIso(read: () => unknown): string | null {
+  let value: unknown;
+  try {
+    value = read();
+  } catch {
+    return null;
+  }
+  const time = value as { toJSDate?: () => Date } | null;
+  if (!time || typeof time.toJSDate !== "function") return null;
+  try {
+    return toIsoOrNull(time.toJSDate());
+  } catch {
+    return null;
+  }
+}
 
 // createDAVClient returns a logged-in client whose type omits the login
 // methods. Capture that shape for our field types.
@@ -42,8 +83,8 @@ export interface CalendarEvent {
   summary: string | null;
   description: string | null;
   location: string | null;
-  start: string; // ISO
-  end: string; // ISO
+  start: string | null; // ISO, or null when the event carries no usable DTSTART
+  end: string | null; // ISO, or null when the event carries no usable DTEND
   allDay: boolean;
   organizer: string | null;
   attendees: string[];
@@ -132,10 +173,25 @@ export class CalDavClient {
     const events: CalendarEvent[] = [];
     for (const obj of objects) {
       if (!obj.data) continue;
-      const parsed = parseICalEvents(obj.data, obj.url);
-      events.push(...parsed);
+      // ICAL.parse throws a ParserError on a malformed .ics; without this the
+      // whole time window came back empty because of a single bad object.
+      try {
+        events.push(...parseICalEvents(obj.data, obj.url));
+      } catch (err) {
+        warn("failed to parse calendar object; skipping it", {
+          url: obj.url,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
-    events.sort((a, b) => a.start.localeCompare(b.start));
+    // Events without a usable start go last rather than throwing on
+    // localeCompare of null.
+    events.sort((a, b) => {
+      if (a.start === b.start) return 0;
+      if (a.start === null) return 1;
+      if (b.start === null) return -1;
+      return a.start.localeCompare(b.start);
+    });
     return events;
   }
 
@@ -165,10 +221,19 @@ export class CalDavClient {
     for (const url of calendarUrls) {
       const events = await this.listEvents(url, rangeStart, rangeEnd);
       for (const e of events) {
-        busy.push({
-          start: new Date(e.start).getTime(),
-          end: new Date(e.end).getTime(),
-        });
+        const start = e.start === null ? NaN : new Date(e.start).getTime();
+        const end = e.end === null ? NaN : new Date(e.end).getTime();
+        // An event we cannot place in time cannot mark anything busy. Keeping
+        // it would poison `cursor` through Math.max(cursor, NaN) below and
+        // silently drop every remaining free slot.
+        if (!Number.isFinite(start) || !Number.isFinite(end)) {
+          warn("skipping undated event in free-slot search", {
+            url: e.url,
+            uid: e.uid,
+          });
+          continue;
+        }
+        busy.push({ start, end });
       }
     }
     busy.sort((a, b) => a.start - b.start);
@@ -184,6 +249,15 @@ export class CalDavClient {
 
     const rangeStartMs = new Date(rangeStart).getTime();
     const rangeEndMs = new Date(rangeEnd).getTime();
+    // Unparsable bounds used to produce NaN cursors, so every comparison below
+    // was false and the tool quietly answered "no free slots" instead of
+    // reporting bad input.
+    if (!Number.isFinite(rangeStartMs) || !Number.isFinite(rangeEndMs)) {
+      throw new Error(
+        "range_start and range_end must be ISO 8601 datetimes; got " +
+          `${JSON.stringify(rangeStart)} and ${JSON.stringify(rangeEnd)}.`
+      );
+    }
     const durationMs = durationMinutes * 60 * 1000;
     const free: FreeSlot[] = [];
     let cursor = rangeStartMs;
@@ -251,29 +325,82 @@ function parseICalEvents(icsData: string, objectUrl: string): CalendarEvent[] {
   const jcal = ICAL.parse(icsData);
   const vcal = new ICAL.Component(jcal);
   const vevents = vcal.getAllSubcomponents("vevent");
-  return vevents.map((ve) => {
-    const event = new ICAL.Event(ve);
-    const start = event.startDate;
-    const end = event.endDate;
-    const attendeeProps = ve.getAllProperties("attendee");
-    const organizerProp = ve.getFirstProperty("organizer");
-    return {
-      uid: event.uid ?? "",
-      url: objectUrl,
-      summary: event.summary ?? null,
-      description: event.description ?? null,
-      location: event.location ?? null,
-      start: start.toJSDate().toISOString(),
-      end: end.toJSDate().toISOString(),
-      allDay: Boolean(start.isDate),
-      organizer: organizerProp ? String(organizerProp.getFirstValue()) : null,
-      attendees: attendeeProps.map((p) => String(p.getFirstValue())),
-      status: (ve.getFirstPropertyValue("status") as string | null) ?? null,
-      recurrenceId: event.recurrenceId
-        ? event.recurrenceId.toJSDate().toISOString()
-        : null,
-    };
+  const out: CalendarEvent[] = [];
+  for (const ve of vevents) {
+    // Per-event isolation: one unreadable VEVENT must not hide the others.
+    try {
+      out.push(toCalendarEvent(ve, objectUrl));
+    } catch (err) {
+      out.push(degradedEvent(ve, objectUrl, err));
+    }
+  }
+  return out;
+}
+
+function toCalendarEvent(
+  ve: InstanceType<typeof ICAL.Component>,
+  objectUrl: string
+): CalendarEvent {
+  const event = new ICAL.Event(ve);
+  const attendeeProps = ve.getAllProperties("attendee");
+  const organizerProp = ve.getFirstProperty("organizer");
+  let allDay = false;
+  try {
+    allDay = Boolean(event.startDate?.isDate);
+  } catch {
+    allDay = false;
+  }
+  return {
+    uid: event.uid ?? "",
+    url: objectUrl,
+    summary: event.summary ?? null,
+    description: event.description ?? null,
+    location: event.location ?? null,
+    start: icalTimeToIso(() => event.startDate),
+    end: icalTimeToIso(() => event.endDate),
+    allDay,
+    organizer: organizerProp ? String(organizerProp.getFirstValue()) : null,
+    attendees: attendeeProps.map((p) => String(p.getFirstValue())),
+    status: (ve.getFirstPropertyValue("status") as string | null) ?? null,
+    recurrenceId: icalTimeToIso(() => event.recurrenceId),
+  };
+}
+
+/**
+ * Last-resort entry for a VEVENT that could not be read at all, keeping
+ * whatever identifies it so the event stays visible rather than vanishing.
+ */
+function degradedEvent(
+  ve: InstanceType<typeof ICAL.Component>,
+  objectUrl: string,
+  err: unknown
+): CalendarEvent {
+  const salvage = (name: string): string | null => {
+    try {
+      const value = ve.getFirstPropertyValue(name);
+      return value == null ? null : String(value);
+    } catch {
+      return null;
+    }
+  };
+  warn("failed to read calendar event; returning degraded entry", {
+    url: objectUrl,
+    error: err instanceof Error ? err.message : String(err),
   });
+  return {
+    uid: salvage("uid") ?? "",
+    url: objectUrl,
+    summary: salvage("summary"),
+    description: null,
+    location: null,
+    start: null,
+    end: null,
+    allDay: false,
+    organizer: null,
+    attendees: [],
+    status: salvage("status"),
+    recurrenceId: null,
+  };
 }
 
 function buildIcs(input: NewEventInput & { uid: string }): string {
