@@ -11,6 +11,7 @@
 
 import { ImapFlow, ImapFlowOptions, FetchMessageObject } from "imapflow";
 import { simpleParser, ParsedMail } from "mailparser";
+import { safeMessageDate, toIsoOrNull } from "./safe-date.js";
 
 export interface ImapAuth {
   host: string;
@@ -203,8 +204,10 @@ export class ImapClient {
         uid: msg.uid as number,
         seq: msg.seq as number,
         flags: Array.from(msg.flags ?? []),
-        date:
-          (msg.internalDate as Date | undefined)?.toISOString() ?? null,
+        // INTERNALDATE first (it is the server's own receive time and cannot be
+        // forged by the sender), falling back to the parsed `Date:` header only
+        // if the server handed us something unusable. Never throws.
+        date: toIsoOrNull(msg.internalDate) ?? toIsoOrNull(parsed.date),
         subject: parsed.subject ?? null,
         from: parsed.from?.text ?? null,
         to: Array.isArray(parsed.to)
@@ -305,7 +308,14 @@ export class ImapClient {
       bodyParts: ["1"],
     };
     for await (const msg of client.fetch(range, fetchOpts, { uid: byUid })) {
-      out.push(summarize(msg));
+      // Per-message isolation: one corrupt message must never take down the
+      // whole listing. `summarize` is already total with respect to dates, so
+      // this only catches unexpected damage in other envelope fields.
+      try {
+        out.push(summarize(msg));
+      } catch (err) {
+        out.push(degradedSummary(msg, err));
+      }
     }
     return out;
   }
@@ -332,7 +342,41 @@ function addrText(
   );
 }
 
-function summarize(msg: FetchMessageObject): MessageSummary {
+/**
+ * Last-resort summary for a message whose envelope could not be read at all.
+ *
+ * Keeps the UID visible so the message stays inspectable and movable instead of
+ * silently disappearing from the mailbox listing.
+ */
+function degradedSummary(
+  msg: FetchMessageObject,
+  err: unknown
+): MessageSummary {
+  console.error(
+    JSON.stringify({
+      ts: new Date().toISOString(),
+      level: "warn",
+      msg: "failed to summarize message; returning degraded entry",
+      uid: msg?.uid ?? null,
+      seq: msg?.seq ?? null,
+      error: err instanceof Error ? err.message : String(err),
+    })
+  );
+  return {
+    uid: msg?.uid as number,
+    seq: msg?.seq as number,
+    flags: Array.from(msg?.flags ?? []),
+    date: toIsoOrNull(msg?.internalDate),
+    subject: null,
+    from: null,
+    to: null,
+    cc: null,
+    size: null,
+    preview: null,
+  };
+}
+
+export function summarize(msg: FetchMessageObject): MessageSummary {
   const env = msg.envelope;
   // Try to grab a short text preview from bodyParts if present.
   let preview: string | null = null;
@@ -348,7 +392,9 @@ function summarize(msg: FetchMessageObject): MessageSummary {
     uid: msg.uid as number,
     seq: msg.seq as number,
     flags: Array.from(msg.flags ?? []),
-    date: env?.date ? new Date(env.date).toISOString() : null,
+    // `env.date` is typed as `Date` by imapflow, but it hands back the raw
+    // header string whenever that header failed to parse — hence the guard.
+    date: safeMessageDate(env?.date, msg.internalDate),
     subject: env?.subject ?? null,
     from: addrText(env?.from),
     to: addrText(env?.to),
