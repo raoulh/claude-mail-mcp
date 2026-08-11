@@ -21,6 +21,7 @@ import { AccountsStore } from "./accounts.js";
 import { ClientPool } from "./client-pool.js";
 import { registerMailTools } from "./tools-mail.js";
 import { registerCalendarTools } from "./tools-calendar.js";
+import { buildStamp } from "./build-stamp.js";
 
 const VERSION = "0.2.1";
 
@@ -94,6 +95,7 @@ async function main(): Promise<void> {
       status: "ok",
       server: "claude-mail-mcp",
       version: VERSION,
+      build: buildStamp(VERSION),
       accounts: store.publicSummaries(),
       accounts_file: config.accountsFile,
     });
@@ -131,10 +133,19 @@ async function main(): Promise<void> {
   });
 
   app.listen(config.port, config.host, () => {
+    // Emitted unconditionally (not through log(), which honours logLevel) so
+    // that "which build is actually running?" is always answerable from the
+    // process output alone.
+    const stamp = buildStamp(VERSION);
+    console.error(
+      `connector build version=${stamp.version} hash=${stamp.hash ?? "src"} ` +
+        `builtAt=${stamp.builtAt ?? "n/a"} dateGuard=${stamp.dateGuard}`
+    );
     log("info", "claude-mail-mcp listening", {
       host: config.host,
       port: config.port,
       version: VERSION,
+      build: stamp,
       public_url: config.publicUrl,
       accounts_file: config.accountsFile,
       accounts: store.ids(),

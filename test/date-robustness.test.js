@@ -57,6 +57,60 @@ test("root cause: the old formatting expression really does throw", () => {
   assert.ok(Boolean("Fri, 32 Zzz 2099 99:99:99"));
 });
 
+/**
+ * Verbatim `Date:` header of the spam message that took down INBOX in
+ * production. Note the doubled time and timezone: "09:02:34 GMT 00:00:0 -0000".
+ */
+const REAL_WORLD_BAD_HEADER =
+  "Tue, 11 Aug 2026 09:02:34 GMT 00:00:0 -0000 (UTC) ";
+
+test("production repro: the real spam header is unparsable and used to throw", () => {
+  const d = new Date(REAL_WORLD_BAD_HEADER);
+  assert.equal(Number.isFinite(d.getTime()), false, "must be an Invalid Date");
+  assert.throws(() => d.toISOString(), /Invalid time value/);
+
+  // Because it does not parse, imapflow's parseEnvelope stores the RAW STRING
+  // in envelope.date rather than a Date — the shape the old truthiness guard
+  // sailed straight past.
+  assert.equal(typeof REAL_WORLD_BAD_HEADER, "string");
+  assert.ok(Boolean(REAL_WORLD_BAD_HEADER));
+});
+
+test("production repro: listing the real spam message no longer throws", () => {
+  // No INTERNALDATE available -> date must be null, not an exception.
+  let bare;
+  assert.doesNotThrow(() => {
+    bare = summarize(
+      fakeMessage({ uid: 4242, envelopeDate: REAL_WORLD_BAD_HEADER })
+    );
+  });
+  assert.equal(bare.date, null);
+  assert.equal(bare.uid, 4242, "the message must stay addressable");
+
+  // With INTERNALDATE (the normal case on a real server) we report that.
+  const withInternal = summarize(
+    fakeMessage({
+      uid: 4242,
+      envelopeDate: REAL_WORLD_BAD_HEADER,
+      internalDate: new Date("2026-08-11T09:03:06.000Z"),
+    })
+  );
+  assert.equal(withInternal.date, "2026-08-11T09:03:06.000Z");
+
+  // And the whole listing survives it, which is the actual production symptom.
+  const inbox = [
+    fakeMessage({ uid: 1, envelopeDate: GOOD_DATE }),
+    fakeMessage({ uid: 4242, envelopeDate: REAL_WORLD_BAD_HEADER }),
+    fakeMessage({ uid: 4243, envelopeDate: GOOD_DATE }),
+  ];
+  let listed;
+  assert.doesNotThrow(() => {
+    listed = inbox.map(summarize);
+  });
+  assert.equal(listed.length, 3);
+  assert.doesNotThrow(() => JSON.stringify(listed));
+});
+
 test("toIsoOrNull accepts every shape imapflow can hand back", () => {
   assert.equal(toIsoOrNull(GOOD_DATE), "2026-08-01T10:00:00.000Z");
   assert.equal(
