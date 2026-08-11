@@ -143,15 +143,17 @@ export class ImapClient {
       if (opts.unreadOnly) {
         const found = await client.search({ seen: false }, { uid: true });
         const arr = Array.isArray(found) ? found : [];
-        uids = arr.slice(-limit).reverse();
+        uids = arr.slice(-limit);
       } else {
         // Fetch the newest `limit` by sequence number.
         const from = Math.max(1, total - limit + 1);
         const messages = await this.fetchRange(client, `${from}:*`, false);
-        return messages.reverse();
+        return sortNewestFirst(messages);
       }
       if (uids.length === 0) return [];
-      return await this.fetchRange(client, uids.join(","), true);
+      return sortNewestFirst(
+        await this.fetchRange(client, uids.join(","), true)
+      );
     } finally {
       lock.release();
     }
@@ -180,8 +182,10 @@ export class ImapClient {
       const found = await client.search(query, { uid: true });
       const uids = Array.isArray(found) ? found : [];
       if (uids.length === 0) return [];
-      const slice = uids.slice(-Math.min(limit, 200)).reverse();
-      return await this.fetchRange(client, slice.join(","), true);
+      const slice = uids.slice(-Math.min(limit, 200));
+      return sortNewestFirst(
+        await this.fetchRange(client, slice.join(","), true)
+      );
     } finally {
       lock.release();
     }
@@ -340,6 +344,28 @@ function addrText(
       .filter((v): v is string => Boolean(v))
       .join(", ") || null
   );
+}
+
+/**
+ * Order message summaries newest-first, i.e. by descending UID.
+ *
+ * IMAP UIDs are strictly ascending in order of arrival, so descending UID is
+ * "newest first" in the same sense the sequence-number path already used. The
+ * order in which a server emits untagged FETCH responses is NOT guaranteed to
+ * follow the order of the requested sequence set — most servers answer in
+ * ascending sequence order whatever you asked for — so the ordering has to be
+ * re-established here rather than assumed from the fetch.
+ *
+ * Entries with no usable UID (a message that could only be summarised in
+ * degraded form) are parked at the end instead of poisoning the comparison.
+ */
+export function sortNewestFirst(list: MessageSummary[]): MessageSummary[] {
+  return [...list].sort((a, b) => {
+    const ua = Number.isFinite(a?.uid) ? (a.uid as number) : -Infinity;
+    const ub = Number.isFinite(b?.uid) ? (b.uid as number) : -Infinity;
+    if (ua === ub) return 0;
+    return ub - ua;
+  });
 }
 
 /**
