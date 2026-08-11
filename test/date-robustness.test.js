@@ -11,11 +11,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import {
-  toIsoOrNull,
-  safeMessageDate,
-  compareByDateDesc,
-} from "../dist/safe-date.js";
+import { toIsoOrNull, safeMessageDate } from "../dist/safe-date.js";
 import { summarize } from "../dist/imap-client.js";
 
 /**
@@ -227,20 +223,3 @@ test("one corrupt message no longer hides the rest of the mailbox", () => {
   assert.doesNotThrow(() => JSON.stringify(listed));
 });
 
-test("compareByDateDesc sorts newest first and parks null dates at the end", () => {
-  const rows = [
-    { uid: 1, date: null },
-    { uid: 2, date: "2026-08-01T10:00:00.000Z" },
-    { uid: 3, date: null },
-    { uid: 4, date: "2026-08-03T10:00:00.000Z" },
-    { uid: 5, date: "2026-08-02T10:00:00.000Z" },
-  ];
-  let sorted;
-  assert.doesNotThrow(() => {
-    sorted = [...rows].sort(compareByDateDesc);
-  });
-  assert.deepEqual(
-    sorted.map((r) => r.uid),
-    [4, 5, 2, 1, 3]
-  );
-});

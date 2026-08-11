@@ -59,22 +59,3 @@ export function safeMessageDate(
 ): string | null {
   return toIsoOrNull(headerDate) ?? toIsoOrNull(internalDate);
 }
-
-/**
- * Comparator ordering message summaries newest-first while keeping entries
- * without a usable date at the end of the list rather than throwing or
- * scattering them randomly.
- */
-export function compareByDateDesc(
-  a: { date: string | null },
-  b: { date: string | null }
-): number {
-  const ta = a?.date ? Date.parse(a.date) : NaN;
-  const tb = b?.date ? Date.parse(b.date) : NaN;
-  const aBad = !Number.isFinite(ta);
-  const bBad = !Number.isFinite(tb);
-  if (aBad && bBad) return 0;
-  if (aBad) return 1;
-  if (bBad) return -1;
-  return tb - ta;
-}
